@@ -252,8 +252,9 @@ class GPT(nn.Module):
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual learning
         # U-net structure on token value embeddings by @leloykun
         self.value_embeds = ValueEmbedding(vocab_size, model_dim)
-        self.lm_head = CastedLinear(model_dim, vocab_size, bias=True) # use bias only in the head attention
+        self.lm_head = nn.Linear(model_dim, vocab_size, bias=True, dtype=torch.bfloat16)
         self.lm_head.weight.data.zero_() # @Grad62304977
+        self.lm_head.bias.data.zero_() # @Grad62304977
         # U-net design by @brendanh0gan
         self.num_encoder_layers = num_layers // 2 # Half of the layers for encoder
         self.num_decoder_layers = num_layers - self.num_encoder_layers # Remaining for decoder
@@ -562,14 +563,14 @@ for step in range(train_steps + 1):
     print0(f'step:{step+1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms', console=True)
 
 
-FOLDER_NAME = "{:010d}"
-base_path = f'ckpts/{run_id}'
-os.makedirs(base_path, exist_ok=True)
-curr_save_dir = base_path / FOLDER_NAME.format(train_steps)
 if master_process:
-   curr_save_dir.mkdir(parents=False, exist_ok=True)
+    base_path = f'ckpts/{run_id}'
+    os.makedirs(base_path, exist_ok=True)
+    curr_save_dir = Path(base_path) / f"{train_steps:010d}"
+    curr_save_dir.mkdir(parents=False, exist_ok=True)
 if dist.is_initialized():
     dist.barrier()
+
 print0("saving...")
 model_sd, optim_sd = get_state_dict(model, optimizers)
 state_dict = {"model": model_sd, "optimizers": optim_sd}
