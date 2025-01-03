@@ -25,8 +25,9 @@ from torch.distributed.checkpoint.state_dict import (
     get_state_dict,
 )
 
-MODEL_NUM_LAYERS = 12
+MODEL_NUM_LAYERS = 16
 MODEL_BLOCK_SIZE = 128
+MODEL_MAX_SEQ_LEN = 1024
 # -----------------------------------------------------------------------------
 # Muon optimizer
 
@@ -152,7 +153,7 @@ class CastedLinear(nn.Linear):
 
 class Rotary(nn.Module):
 
-    def __init__(self, dim, max_seq_len=65536):
+    def __init__(self, dim, max_seq_len):
         super().__init__()
         # half-truncate RoPE by @YouJiacheng
         angular_freq = (1 / 1024) ** torch.linspace(0, 1, steps=dim//4, dtype=torch.float32)
@@ -179,7 +180,7 @@ class CausalSelfAttention(nn.Module):
         self.c_k = CastedLinear(dim, dim)
         self.c_v = CastedLinear(dim, dim)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
-        self.rotary = Rotary(dim // num_heads) # dim // num_heads = head_dim
+        self.rotary = Rotary(dim // num_heads, max_seq_len=MODEL_MAX_SEQ_LEN) # dim // num_heads = head_dim
         self.c_proj = CastedLinear(dim, dim)
         self.c_proj.weight.data.zero_() # zero init suggested by @Grad62304977
 
@@ -233,12 +234,17 @@ class Block(nn.Module):
 class ValueEmbedding(nn.Module):
     def __init__(self, vocab_size, model_dim):
         super().__init__()
-        self.embed = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
+        self.embed = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(4)])
 
     def forward(self, inputs):
         ve = [emb(inputs).bfloat16() for emb in self.embed]
         # 012 ... 012 structure on token value embeddings by @YouJiacheng, improved on @leloykun's U-net structure
         # WARNING THIS DEPENDS ON THE MODEL DIM
+        if MODEL_NUM_LAYERS == 16:
+            ve = [ve[0], ve[1], ve[2], ve[3],
+                  None, None, None, None, 
+                  None, None, None, None, 
+                  ve[0], ve[1], ve[2], ve[3]]
         if MODEL_NUM_LAYERS == 12:
             ve = [ve[0], ve[1], ve[2], None, None, None, None, None, None, ve[0], ve[1], ve[2]]
         if MODEL_NUM_LAYERS == 6:
@@ -256,8 +262,10 @@ class GPT(nn.Module):
     def __init__(self, vocab_size, num_layers, num_heads, model_dim):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim)
-        # skip attention of blocks.4 in a 8 layer config (the 8th layer) by @YouJiacheng
-        self.blocks = nn.ModuleList([Block(model_dim, num_heads, use_attn=(i != 7))
+        # skip attention of blocks every 4 block.4 in a 8 layer config (the 8th layer) by @YouJiacheng
+        self.blocks = nn.ModuleList([Block(model_dim, num_heads, 
+                                           # use_attn=((i + 1) % 4 != 0))
+                                           use_attn=True)
                                      for i in range(num_layers)])
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual learning
         # U-net structure on token value embeddings by @leloykun
@@ -398,8 +406,8 @@ class Hyperparameters:
     train_bin = 'data/fineweb10B/fineweb_train_*.bin' # input .bin to train on
     val_bin = 'data/fineweb10B/fineweb_val_*.bin' # input .bin to eval validation loss on
     # optimization
-    batch_size = 8*64*1024 # batch size in tokens
-    max_device_batch_size = 64*1024 # batch size per device in tokens
+    batch_size = 8 * MODEL_MAX_SEQ_LEN # batch size in tokens
+    max_device_batch_size = 1 * MODEL_MAX_SEQ_LEN # batch size per device in tokens
     num_iterations = 125 * 15 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     bf16_embeds = True
@@ -585,18 +593,16 @@ for step in range(train_steps + 1):
     approx_time = training_time_ms + 1000 * (time.perf_counter() - t0)
     print0(f'step:{step+1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms', console=True)
 
-print0("saving...")
-if master_process and False:
+print0("saving...", console=True)
+if master_process:
     base_path = f'ckpts/{run_id}'
-    os.makedirs(base_path, exist_ok=True)
     curr_save_dir = Path(base_path) / f"{train_steps:010d}"
-    curr_save_dir.mkdir(parents=False, exist_ok=True)
+    os.makedirs(curr_save_dir, exist_ok=True)
+    curr_save_dir.mkdir(parents=True, exist_ok=True)
     model_sd, optim_sd = get_state_dict(model, optimizers)
     state_dict = {"model": model_sd, "optimizers": optim_sd}
     dckpt.save(state_dict, checkpoint_id=curr_save_dir)
-print0("state dict saved!")
 
-dist.barrier()
-
+print0("state dict saved!", console=True)
 print0(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB')
 dist.destroy_process_group()
