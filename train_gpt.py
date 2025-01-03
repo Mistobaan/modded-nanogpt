@@ -135,8 +135,8 @@ def norm(x):
 
 class CastedLinear(nn.Linear):
 
-    def __init__(self, in_features, out_features):
-        super().__init__(in_features, out_features, bias=False)
+    def __init__(self, in_features, out_features, bias=False):
+        super().__init__(in_features, out_features, bias=bias)
 
     def forward(self, x):
         return F.linear(x, self.weight.type_as(x))
@@ -245,7 +245,7 @@ class GPT(nn.Module):
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual learning
         # U-net structure on token value embeddings by @leloykun
         self.value_embeds = ValueEmbedding(vocab_size, model_dim)
-        self.lm_head = CastedLinear(model_dim, vocab_size)
+        self.lm_head = CastedLinear(model_dim, vocab_size, bias=True) # use bias only in the head attention
         self.lm_head.weight.data.zero_() # @Grad62304977
         # U-net design by @brendanh0gan
         self.num_encoder_layers = num_layers // 2 # Half of the layers for encoder
