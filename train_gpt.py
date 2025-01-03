@@ -25,6 +25,8 @@ from torch.distributed.checkpoint.state_dict import (
     get_state_dict,
 )
 
+MODEL_NUM_LAYERS = 12
+MODEL_BLOCK_SIZE = 128
 # -----------------------------------------------------------------------------
 # Muon optimizer
 
@@ -224,6 +226,7 @@ class Block(nn.Module):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
         if self.attn is not None:
             x = x + self.attn(norm(x), ve, block_mask)
+        # residual 
         x = x + self.mlp(norm(x))
         return x
 
@@ -235,7 +238,14 @@ class ValueEmbedding(nn.Module):
     def forward(self, inputs):
         ve = [emb(inputs).bfloat16() for emb in self.embed]
         # 012 ... 012 structure on token value embeddings by @YouJiacheng, improved on @leloykun's U-net structure
-        ve = [ve[0], ve[1], ve[2], None, None, None, None, None, None, ve[0], ve[1], ve[2]]
+        # WARNING THIS DEPENDS ON THE MODEL DIM
+        if MODEL_NUM_LAYERS == 12:
+            ve = [ve[0], ve[1], ve[2], None, None, None, None, None, None, ve[0], ve[1], ve[2]]
+        if MODEL_NUM_LAYERS == 6:
+            ve = [ve[0], ve[1], ve[2], ve[0], ve[1], ve[2]]
+        if MODEL_NUM_LAYERS == 8:
+            ve = [ve[0], ve[1], ve[2], None, None, ve[0], ve[1], ve[2]]
+        assert len(ve) == MODEL_NUM_LAYERS
         return ve
 
 # -----------------------------------------------------------------------------
@@ -246,7 +256,7 @@ class GPT(nn.Module):
     def __init__(self, vocab_size, num_layers, num_heads, model_dim):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim)
-        # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
+        # skip attention of blocks.4 in a 8 layer config (the 8th layer) by @YouJiacheng
         self.blocks = nn.ModuleList([Block(model_dim, num_heads, use_attn=(i != 7))
                                      for i in range(num_layers)])
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual learning
@@ -254,7 +264,7 @@ class GPT(nn.Module):
         self.value_embeds = ValueEmbedding(vocab_size, model_dim)
         self.lm_head = nn.Linear(model_dim, vocab_size, bias=True, dtype=torch.bfloat16)
         self.lm_head.weight.data.zero_() # @Grad62304977
-        self.lm_head.bias.data.zero_() # @Grad62304977
+        self.lm_head.bias.data.zero_() 
         # U-net design by @brendanh0gan
         self.num_encoder_layers = num_layers // 2 # Half of the layers for encoder
         self.num_decoder_layers = num_layers - self.num_encoder_layers # Remaining for decoder
@@ -262,7 +272,7 @@ class GPT(nn.Module):
         self.skip_weights = nn.Parameter(torch.ones(self.num_decoder_layers))
 
     def forward(self, inputs, targets, sliding_window_num_blocks):
-        BLOCK_SIZE = 128
+        BLOCK_SIZE = MODEL_BLOCK_SIZE
         seq_len = len(inputs)
         assert seq_len % BLOCK_SIZE == 0
         total_num_blocks = seq_len // BLOCK_SIZE
@@ -390,18 +400,20 @@ class Hyperparameters:
     # optimization
     batch_size = 8*64*1024 # batch size in tokens
     max_device_batch_size = 64*1024 # batch size per device in tokens
-    num_iterations = 1490 # number of iterations to run
+    num_iterations = 125 * 15 # number of iterations to run
     cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
     bf16_embeds = True
     # evaluation and logging
     val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
-    val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
+    val_tokens = 10_485_760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
     # implementation
     save_checkpoint = False
+    rng_seed = 42
 args = Hyperparameters()
 
 micro_bs = args.max_device_batch_size
 
+torch.manual_seed(args.rng_seed)
 # set up DDP (distributed data parallel). torchrun sets this env variable
 rank = int(os.environ['RANK'])
 local_rank = int(os.environ['LOCAL_RANK'])
@@ -427,6 +439,9 @@ def print0(s, console=False):
                 print(s)
             print(s, file=f)
 
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
 # begin by printing this file (the Python code)
 print0(code)
 print0('='*100)
@@ -445,12 +460,20 @@ print0('='*100)
 
 # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
 # this originates from Karpathy's experiments.
-model = GPT(vocab_size=50304, num_layers=12, num_heads=6, model_dim=768)
+# num_layers has to be multiple of 2
+# model = GPT(vocab_size=50368, num_layers=MODEL_NUM_LAYERS, num_heads=10, model_dim=1280)
+model = GPT(vocab_size=50368, num_layers=MODEL_NUM_LAYERS, num_heads=3, model_dim=384)
+if master_process:
+    param_count = count_parameters(model)
+    print0(f"num params: {param_count}")
+
 model = model.cuda()
 if args.bf16_embeds:
     for m in model.modules():
         if isinstance(m, nn.Embedding):
             m.bfloat16()
+
+
 model = torch.compile(model)
 ddp_model = DDP(model, device_ids=[local_rank], broadcast_buffers=False, gradient_as_bucket_view=True)
 
@@ -562,20 +585,18 @@ for step in range(train_steps + 1):
     approx_time = training_time_ms + 1000 * (time.perf_counter() - t0)
     print0(f'step:{step+1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms', console=True)
 
-
-if master_process:
+print0("saving...")
+if master_process and False:
     base_path = f'ckpts/{run_id}'
     os.makedirs(base_path, exist_ok=True)
     curr_save_dir = Path(base_path) / f"{train_steps:010d}"
     curr_save_dir.mkdir(parents=False, exist_ok=True)
-if dist.is_initialized():
-    dist.barrier()
-
-print0("saving...")
-model_sd, optim_sd = get_state_dict(model, optimizers)
-state_dict = {"model": model_sd, "optimizers": optim_sd}
-dckpt.checkpoint.save(state_dict, checkpoint_id=curr_save_dir)
+    model_sd, optim_sd = get_state_dict(model, optimizers)
+    state_dict = {"model": model_sd, "optimizers": optim_sd}
+    dckpt.save(state_dict, checkpoint_id=curr_save_dir)
 print0("state dict saved!")
+
+dist.barrier()
 
 print0(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB')
 dist.destroy_process_group()
