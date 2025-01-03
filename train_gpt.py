@@ -8,15 +8,22 @@ import glob
 import subprocess
 import contextlib
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
 torch.empty(1, device='cuda', requires_grad=True).backward()
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+import torch.distributed.checkpoint as dckpt
 from torch.nn.parallel import DistributedDataParallel as DDP
 # use of FlexAttention contributed by @KoszarskyB
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
+
+# save checkpoint
+from torch.distributed.checkpoint.state_dict import (
+    get_state_dict,
+)
 
 # -----------------------------------------------------------------------------
 # Muon optimizer
@@ -553,6 +560,21 @@ for step in range(train_steps + 1):
     # logging
     approx_time = training_time_ms + 1000 * (time.perf_counter() - t0)
     print0(f'step:{step+1}/{train_steps} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms', console=True)
+
+
+FOLDER_NAME = "{:010d}"
+base_path = f'ckpts/{run_id}'
+os.makedirs(base_path, exist_ok=True)
+curr_save_dir = base_path / FOLDER_NAME.format(train_steps)
+if master_process:
+   curr_save_dir.mkdir(parents=False, exist_ok=True)
+if dist.is_initialized():
+    dist.barrier()
+print0("saving...")
+model_sd, optim_sd = get_state_dict(model, optimizers)
+state_dict = {"model": model_sd, "optimizers": optim_sd}
+dckpt.checkpoint.save(state_dict, checkpoint_id=curr_save_dir)
+print0("state dict saved!")
 
 print0(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB')
 dist.destroy_process_group()
