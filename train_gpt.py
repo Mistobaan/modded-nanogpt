@@ -469,8 +469,8 @@ print0('='*100)
 # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency. suggested to me by @Grad62304977.
 # this originates from Karpathy's experiments.
 # num_layers has to be multiple of 2
-# model = GPT(vocab_size=50368, num_layers=MODEL_NUM_LAYERS, num_heads=10, model_dim=1280)
-model = GPT(vocab_size=50368, num_layers=MODEL_NUM_LAYERS, num_heads=3, model_dim=384)
+model = GPT(vocab_size=50368, num_layers=MODEL_NUM_LAYERS, num_heads=5, model_dim=1280)
+# model = GPT(vocab_size=50368, num_layers=MODEL_NUM_LAYERS, num_heads=3, model_dim=384)
 if master_process:
     param_count = count_parameters(model)
     print0(f"num params: {param_count}")
@@ -604,5 +604,5 @@ if master_process:
     dckpt.save(state_dict, checkpoint_id=curr_save_dir)
 
 print0("state dict saved!", console=True)
-print0(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB')
+print0(f'peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB', console=True)
 dist.destroy_process_group()
