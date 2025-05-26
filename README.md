@@ -20,12 +20,12 @@ This improvement in training speed has been brought about by the following techn
 As well as many systems optimizations.
 
 Contributors list (growing with each new record): [@bozavlado](https://x.com/bozavlado); [@brendanh0gan](https://x.com/brendanh0gan);
-[@fernbear.bsky.social](https://bsky.app/profile/fernbear.bsky.social); [@Grad62304977](https://x.com/Grad62304977); 
+[@fernbear.bsky.social](https://bsky.app/profile/fernbear.bsky.social); [@Grad62304977](https://x.com/Grad62304977);
 [@jxbz](https://x.com/jxbz); [@kellerjordan0](https://x.com/kellerjordan0);
 [@KoszarskyB](https://x.com/KoszarskyB); [@leloykun](https://x.com/@leloykun);
 [@YouJiacheng](https://x.com/YouJiacheng); [@jadenj3o](https://x.com/jadenj3o);
 [@KonstantinWilleke](https://github.com/KonstantinWilleke), [@alexrgilbert](https://github.com/alexrgilbert), [@adricarda](https://github.com/adricarda),
-[@tuttyfrutyee](https://github.com/tuttyfrutyee), [@vdlad](https://github.com/vdlad); 
+[@tuttyfrutyee](https://github.com/tuttyfrutyee), [@vdlad](https://github.com/vdlad);
 [@ryanyang0](https://x.com/ryanyang0)
 
 
@@ -48,7 +48,7 @@ python data/cached_fineweb10B.py 8
 ## Alternative: Running with Docker (recommended for precise timing)
 
 For cases where CUDA or NCCL versions aren't compatible with your current system setup, Docker can be a helpful alternative.
-This approach standardizes versions for CUDA, NCCL, CUDNN, and Python, reducing dependency issues and simplifying setup. 
+This approach standardizes versions for CUDA, NCCL, CUDNN, and Python, reducing dependency issues and simplifying setup.
 Note: an NVIDIA driver must already be installed on the system (useful if only the NVIDIA driver and Docker are available).
 
 ```bash
@@ -228,13 +228,13 @@ def zeroth_power_via_newtonschulz5(G, steps=5, eps=1e-7):
     a, b, c = (3.4445, -4.7750,  2.0315)
     X = G.bfloat16() / (G.norm() + eps)
     if G.size(0) > G.size(1):
-        X = X.T 
+        X = X.T
     for _ in range(steps):
         A = X @ X.T
         B = b * A + c * A @ A
         X = a * X + B @ X
     if G.size(0) > G.size(1):
-        X = X.T 
+        X = X.T
     return X.to(G.dtype)
 ```
 
@@ -300,4 +300,3 @@ compared to Shampoo.
 ```
 
 <img src="img/dofa.jpg" alt="itsover_wereback" style="width:100%;">
-
