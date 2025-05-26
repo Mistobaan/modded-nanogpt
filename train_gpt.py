@@ -386,18 +386,18 @@ class Block(nn.Module):
         self.mlp = MLP(dim)
         self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0]))
 
-    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
-        x = self.lambdas[0] * x + self.lambdas[1] * x0
-        xx = x
-        x = norm(xx)
-        x = self.attn(x, ve, block_mask)
+    def forward(self, x: Tensor, value_embedding: Tensor | None, block_mask: BlockMask):
+        x0 = x
+        # only analyze the non norm
+        x = norm(x0 - norm(x0))
+        x = self.attn(x, value_embedding, block_mask)
         x = norm(x)
-        xx = xx + x
-        # x = norm(xx)
+        # x0 = x0 + x
+        # x = norm(x0)
         x = self.mlp(x)
         x = norm(x)
-        xx = xx + x
-        return xx
+        x0 = x0 + x
+        return x0
 
 
 # -----------------------------------------------------------------------------
@@ -538,7 +538,7 @@ class GPT(nn.Module):
         for i in range(len(self.blocks)):
             if i >= n:
                 x = x + self.skip_weights[i - n] * skip_connections.pop()
-            x = self.blocks[i](x, ve[i], x0, block_masks[i])
+            x = self.blocks[i](x, ve[i], block_masks[i])
             if i < n:
                 skip_connections.append(x)
 
