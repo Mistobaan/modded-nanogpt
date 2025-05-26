@@ -383,20 +383,28 @@ class Block(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int):
         super().__init__()
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len)
+        # if layer_idx in (7, ):
+        #     self.attn = torch.nn.Identity()
+        self.norm_0 = norm
+        self.norm_1 = norm
+        self.norm_2 = norm
+        self.norm_3 = norm
+        # if layer_idx in (7, ):
+        #     self.norm_0 = torch.nn.Identity()
+        #     self.norm_1 = torch.nn.Identity()
         self.mlp = MLP(dim)
-        self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0]))
+        self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0, 1.0, 0.1]))
 
     def forward(self, x: Tensor, value_embedding: Tensor | None, block_mask: BlockMask):
         x0 = x
-        # only analyze the non norm
-        x = norm(x0 - norm(x0))
+        x = self.norm_0(x0)
         x = self.attn(x, value_embedding, block_mask)
-        x = norm(x)
-        # x0 = x0 + x
-        # x = norm(x0)
+        x = self.norm_1(x)
+        x0 = x0 * self.lambdas[0] + x * self.lambdas[1]
+        x = self.norm_2(x0)
         x = self.mlp(x)
-        x = norm(x)
-        x0 = x0 + x
+        x = self.norm_3(x)
+        x0 = x0 * self.lambdas[2] + x * self.lambdas[3]
         return x0
 
 
