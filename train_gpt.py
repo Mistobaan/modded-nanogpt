@@ -382,22 +382,18 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int):
         super().__init__()
-        # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
-        self.attn = (
-            CausalSelfAttention(dim, num_heads, max_seq_len) if layer_idx != 7 else None
-        )
+        self.attn = CausalSelfAttention(dim, num_heads, max_seq_len)
         self.mlp = MLP(dim)
         self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0]))
 
     def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
         xx = x
-        if self.attn is not None:
-            x = norm(xx)
-            x = self.attn(x, ve, block_mask)
-            x = norm(x)
-            xx = xx + x
         x = norm(xx)
+        x = self.attn(x, ve, block_mask)
+        x = norm(x)
+        # xx = xx + x
+        # x = norm(xx)
         x = self.mlp(x)
         x = norm(x)
         xx = xx + x
