@@ -392,7 +392,7 @@ class Block(nn.Module):
         x = norm(xx)
         x = self.attn(x, ve, block_mask)
         x = norm(x)
-        # xx = xx + x
+        xx = xx + x
         # x = norm(xx)
         x = self.mlp(x)
         x = norm(x)
