@@ -393,18 +393,18 @@ class Block(nn.Module):
         #     self.norm_0 = torch.nn.Identity()
         #     self.norm_1 = torch.nn.Identity()
         self.mlp = MLP(dim)
-        self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0, 1.0, 0.1]))
+        self.lambdas = nn.Parameter(torch.tensor([0.99, 0.01, 0.99, 0.01]))
 
     def forward(self, x: Tensor, value_embedding: Tensor | None, block_mask: BlockMask):
         x0 = x
         x = self.norm_0(x0)
         x = self.attn(x, value_embedding, block_mask)
-        x = self.norm_1(x)
-        x0 = x0 * self.lambdas[0] + x * self.lambdas[1]
+        # x = self.norm_1(x)
+        x0 = x0 * self.lambdas[0] + self.norm_1(x * self.lambdas[1])
         x = self.norm_2(x0)
         x = self.mlp(x)
-        x = self.norm_3(x)
-        x0 = x0 * self.lambdas[2] + x * self.lambdas[3]
+        # x = self.norm_3(x)
+        x0 = x0 * self.lambdas[2] + self.norm_3(x * self.lambdas[3])
         return x0
 
 
