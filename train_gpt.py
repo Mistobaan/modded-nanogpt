@@ -4,6 +4,7 @@ import sys
 with open(sys.argv[0]) as f:
     code = f.read()  # read the code of this file ASAP, for logging
 import copy
+import functools
 import glob
 import time
 import uuid
@@ -13,6 +14,235 @@ from pathlib import Path
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
+import torch.nn
+from torch.utils._triton import has_triton
+
+if not has_triton():
+    print("Skipping because triton is not supported on this device.")
+    gelu = torch.nn.functional.gelu
+
+    class MLP(torch.nn.Module):
+        def __init__(self, dim: int):
+            super().__init__()
+            hdim = int(8 / 3 * dim)  # 8/3 for GELU
+            self.c_fc = CastedLinear(dim, hdim, use_fp8=True)
+            self.c_proj = CastedLinear(hdim, dim, use_fp8=True)
+            self.c_proj.weight.detach().zero_()  # zero init suggested by @Grad62304977
+
+        def forward(self, x: Tensor):
+            x = self.c_fc(x)
+            # https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.gelu.html
+            x = gelu(x)
+            x = self.c_proj(x)
+            return x
+else:
+    import triton
+    from triton import language as tl
+
+    @triton.jit
+    def tanh(x):
+        # Tanh is just a scaled sigmoid
+        return 2 * tl.sigmoid(2 * x) - 1
+
+    # from xformers impl.
+    @triton.jit
+    def gelu(x):
+        """
+        GeLU_ activation - Gaussian error linear unit
+
+        .. _GeLU: https://arxiv.org/pdf/1606.08415.pdf
+        """
+        # M_SQRT_2_PI = math.sqrt(2./math.pi)
+        M_SQRT_2_PI = 0.7978845608028654
+        # from page 2 in the GeLU paper
+        return 0.5 * x * (1 + tanh(M_SQRT_2_PI * (x + 0.044715 * x * x * x)))
+
+    @triton.jit
+    def _geglu_tanh_forward_kernel(
+        a, b, c, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
+    ):
+        program_id = tl.program_id(0).to(tl.int64)
+
+        # locate start index
+        a += program_id * stride
+        b += program_id * stride
+        c += program_id * stride
+
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        mask = col_offsets < n_cols
+        a_row = tl.load(a + col_offsets, mask=mask, other=0).to(tl.float32)
+        b_row = tl.load(b + col_offsets, mask=mask, other=0)
+
+        # tanh approximation form of GELU is computed with:
+        # 0.5 * a * (1 + tanh(sqrt(2 / pi) * (a + 0.044715 * a^3)))
+        sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / pi)
+        a_cubed = a_row * a_row * a_row
+        tanh_arg = sqrt_2_over_pi * (a_row + 0.044715 * a_cubed)
+        tanh_result = tanh(tanh_arg)
+        geglu_a = 0.5 * a_row * (1 + tanh_result)
+        c_row = geglu_a * b_row
+        tl.store(c + col_offsets, c_row, mask=mask)
+
+    @triton.jit
+    def _geglu_tanh_backward_kernel(
+        dc, a, b, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
+    ):
+        program_id = tl.program_id(0).to(tl.int64)
+
+        # locate start index
+        dc += program_id * stride
+        a += program_id * stride
+        b += program_id * stride
+
+        col_offsets = tl.arange(0, BLOCK_SIZE)
+        mask = col_offsets < n_cols
+
+        dc_row = tl.load(dc + col_offsets, mask=mask, other=0)
+        a_row = tl.load(a + col_offsets, mask=mask, other=0).to(tl.float32)
+        b_row = tl.load(b + col_offsets, mask=mask, other=0)
+
+        # recomputation to save memory
+        sqrt_2_over_pi = 0.7978845608028654  # sqrt(2 / pi)
+        a_cubed = a_row * a_row * a_row
+        tanh_arg = sqrt_2_over_pi * (a_row + 0.044715 * a_cubed)
+        tanh_result = tanh(tanh_arg)
+        geglu_a = 0.5 * a_row * (1 + tanh_result)
+
+        db_row = dc_row * geglu_a
+
+        # Gradient w.r.t. a can be computed with:
+        # b * (0.5 * (1 + tanh(z)) + 0.5 * a * (1 - tanh(z)^2) * (sqrt(2/pi) * (1 + 3 * 0.044715 * a^2)))
+        # where z = sqrt(2/pi) * (a + 0.044715 * a^3)
+        term1 = 0.5 * (1 + tanh_result)
+        tanh_sq = tanh_result * tanh_result
+        term2 = (
+            0.5
+            * a_row
+            * (1 - tanh_sq)
+            * (sqrt_2_over_pi * (1 + 3 * 0.044715 * a_row * a_row))
+        )
+        da_row = dc_row * b_row * (term1 + term2)
+
+        tl.store(a + col_offsets, da_row, mask=mask)
+        tl.store(b + col_offsets, db_row, mask=mask)
+
+    def ensure_contiguous(fn):
+        @functools.wraps(fn)
+        def wrapper(ctx, *args, **kwargs):
+            def maybe_to_contiguous(x):
+                return x.contiguous() if isinstance(x, torch.Tensor) else x
+
+            args = [maybe_to_contiguous(arg) for arg in args]
+            kwargs = {k: maybe_to_contiguous(v) for k, v in kwargs.items()}
+            return fn(ctx, *args, **kwargs)
+
+        return wrapper
+
+    def is_hip() -> bool:
+        return torch.version.hip is not None
+
+    def calculate_settings(n):
+        # reference: https://github.com/unslothai/unsloth/blob/fd753fed99ed5f10ef8a9b7139588d9de9ddecfb/unsloth/kernels/utils.py#L43
+
+        MAX_FUSED_SIZE = 65_536
+        BLOCK_SIZE = triton.next_power_of_2(n)
+        if BLOCK_SIZE > MAX_FUSED_SIZE:
+            raise RuntimeError(
+                f"Cannot launch Triton kernel since n = {n} exceeds the recommended Triton blocksize = {MAX_FUSED_SIZE}."
+            )
+
+        num_warps = 4
+        if BLOCK_SIZE >= 32768:
+            num_warps = 32 if not is_hip() else 16
+        elif BLOCK_SIZE >= 8192:
+            num_warps = 16
+        elif BLOCK_SIZE >= 2048:
+            num_warps = 8
+        return BLOCK_SIZE, num_warps
+
+    def geglu_forward(a, b):
+        ori_shape = a.shape
+
+        n_cols = ori_shape[-1]
+        a = a.view(-1, n_cols)
+        b = b.view(-1, n_cols)
+        c = torch.empty_like(a)
+        n_rows = a.shape[0]
+
+        BLOCK_SIZE, num_warps = calculate_settings(n_cols)
+
+        _geglu_tanh_forward_kernel[(n_rows,)](
+            a,
+            b,
+            c,
+            c.stride(-2),
+            n_cols=n_cols,
+            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps=num_warps,
+        )
+        return a, b, c.view(*ori_shape)
+
+    def geglu_backward(a, b, dc):
+        ori_shape = dc.shape
+        n_cols = ori_shape[-1]
+        dc = dc.view(-1, n_cols)
+        n_rows = dc.shape[0]
+
+        BLOCK_SIZE, num_warps = calculate_settings(n_cols)
+
+        _geglu_tanh_backward_kernel[(n_rows,)](
+            dc,
+            a,
+            b,
+            dc.stride(-2),
+            n_cols=n_cols,
+            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps=num_warps,
+        )
+
+        return a.view(*ori_shape), b.view(*ori_shape)
+
+    class GELUMulFunction(torch.autograd.Function):
+        @staticmethod
+        @ensure_contiguous
+        def forward(ctx, a, b):
+            a, b, c = geglu_forward(a, b)
+            ctx.save_for_backward(a, b)
+            return c
+
+        @staticmethod
+        @ensure_contiguous
+        def backward(ctx, dc):
+            a, b = ctx.saved_tensors
+            a, b = geglu_backward(a, b, dc)
+            return a, b
+
+    class MLP(torch.nn.Module):
+        def __init__(self, d_hidden):
+            super().__init__()
+            self.hidden_size = d_hidden
+            self.intermediate_size = int(8 / 3 * d_hidden)  # 2048 where d_hidden = 768
+
+            self.gate_proj = CastedLinear(
+                self.hidden_size, self.intermediate_size, bias=False
+            )
+            self.up_proj = CastedLinear(
+                self.hidden_size, self.intermediate_size, bias=False
+            )
+            self.down_proj = CastedLinear(
+                self.intermediate_size, self.hidden_size, bias=False
+            )
+            # TODO: support exact GELU
+            # Right now Gemma 1, 1.1 and 2 models are all using `gelu_pytorch_tanh`
+            # https://github.com/huggingface/transformers/blob/v4.40.1/src/transformers/models/gemma/modeling_gemma.py#L175
+            # https://github.com/huggingface/transformers/blob/v4.40.1/src/transformers/activations.py#L46
+            # So we can safely assume we use tanh approximation form all the time
+
+        def forward(self, x):
+            return self.down_proj(
+                GELUMulFunction.apply(self.gate_proj(x), self.up_proj(x))
+            )
+
 
 torch.empty(
     1, device="cuda", requires_grad=True
@@ -263,8 +493,9 @@ class CastedLinear(nn.Linear):
         x_s=1.0,
         w_s=1.0,
         grad_s=1.0,
+        bias=False,
     ):
-        super().__init__(in_features, out_features, bias=False)
+        super().__init__(in_features, out_features, bias=bias)
         self.use_fp8 = use_fp8
         self.x_s = x_s
         self.w_s = w_s
@@ -360,23 +591,6 @@ class CausalSelfAttention(nn.Module):
         )  # re-assemble all head outputs side by side
         y = self.c_proj(y)
         return y
-
-
-class MLP(nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        hdim = 4 * dim
-        self.c_fc = CastedLinear(dim, hdim)
-        self.c_proj = CastedLinear(hdim, dim)
-        self.c_proj.weight.detach().zero_()  # zero init suggested by @Grad62304977
-
-    def forward(self, x: Tensor):
-        x = self.c_fc(x)
-        x = F.relu(
-            x
-        ).square()  # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
-        x = self.c_proj(x)
-        return x
 
 
 class Block(nn.Module):
