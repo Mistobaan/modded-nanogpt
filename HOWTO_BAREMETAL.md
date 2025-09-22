@@ -24,3 +24,9 @@ sudo apt-get -y install cuda-toolkit-12-9
 
 ## Reference:
 - [CUDA toolkit 12.9](https://developer.nvidia.com/cuda-12-9-0-download-archive?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=24.04&target_type=deb_local)
+
+
+/usr/local/bin/python3.13 -m venv  .venv 
+source .venv/bin/activate
+
+ ./setup_8xH100.sh /home/ubuntu/fs-us-south-2
