@@ -43,6 +43,13 @@ python data/cached_fineweb10B.py 8
 ./run.sh
 ```
 
+## Running the current record on Lambda Labs 8xH100
+
+```bash
+git clone https://github.com/KellerJordan/modded-nanogpt.git && cd modded-nanogpt
+./run.sh
+```
+
 **Note: torch.compile will add around 5 minutes of latency the first time you run the code.**
 
 ## Alternative: Running with Docker (recommended for precise timing)
