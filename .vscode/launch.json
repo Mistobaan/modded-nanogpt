@@ -3,25 +3,35 @@
     "configurations": [
         {
             "name": "Python: torchrun train_gpt with Profiling",
-            "type": "debugpy",
             "module": "torch.distributed.run", // Use torch.distributed.run for newer torchrun versions
+            "type": "debugpy",
+            "justMyCode": true,
             "request": "launch",
             "console": "integratedTerminal",
             "cwd": "${workspaceFolder}",
             "args": [
                 "--standalone",
                 "--nproc_per_node",
-                "8", // 8xH100
-                "train_gpt.py", // Your main training script
-                "--profile", // Example profiling argument for your script
-                // Add any other arguments for your training script and torchrun
+                "8",
+                "train_gpt.py",
             ],
             "env": {
+                "OMP_NUM_THREADS": "8",
                 // "TORCH_PROFILE_ENABLED": "1", // Enable PyTorch profiler
                 // "TORCH_LOGS": "+dynamo",
                 // "TORCHINDUCTOR_COMPILE_THREADS": "1",
                 // "TORCHDYNAMO_VERBOSE": "1"
             }
+        },
+        {
+            "name": "Attach rank0",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5678
+            },
+            "justMyCode": true
         }
     ]
 }

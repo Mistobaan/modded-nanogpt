@@ -19,7 +19,12 @@ import torch.distributed as dist
 # use of FlexAttention contributed by @KoszarskyB
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
 #torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.benchmark = True    # static shapes
 
+TRAIN_DATASET = os.path.join(os.path.dirname(__file__), './data/fineweb10B/fineweb_train_000001.bin')
+
+assert os.path.exists(TRAIN_DATASET), TRAIN_DATASET
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
 
