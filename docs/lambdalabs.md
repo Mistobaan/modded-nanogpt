@@ -11,9 +11,10 @@ export PYTORCH_VERSION=2.8.0
 export CUDA_VERSION=12.8
 source /opt/miniconda/bin/activate
 conda create -n pytorch python~=${PYTHON_VERSION} -y
+conda activate pytorch
 conda config --add channels conda-forge
 conda config --set channel_priority strict
-conda install uv
+conda install uv -y 
 
 uv sync
 
