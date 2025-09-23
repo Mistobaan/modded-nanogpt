@@ -259,8 +259,9 @@ if __name__ == "__main__":
     git_hash = ensure_clean_repo()
 
     # date in DDMMYY format
-    date_str = datetime.now().strftime("%d%m%y")
+    date_str = datetime.now().strftime("%m%d%y")
     dst_dir = os.path.join(dst_root, date_str)
+    dst_dir = f'{dst_dir}_{git_hash}'
     os.makedirs(dst_dir, exist_ok=True)
 
     for fname in os.listdir(src_dir):
@@ -273,7 +274,7 @@ if __name__ == "__main__":
             shutil.move(src_path, dst_path)
             print(f"Moved {src_path} -> {dst_path}")
 
-    my_records = collect_records("./logs", exclude='GPT2Medium')    
+    my_records = collect_records("./myruns", exclude='GPT2Medium')    
     speedrun_records = collect_records("./records", exclude='GPT2Medium')
     # Add a marker to distinguish
     my_records["source"] = "mine"
@@ -283,12 +284,19 @@ if __name__ == "__main__":
     combined = pd.concat([my_records, speedrun_records], ignore_index=True)
 
     # Sort by val_loss ascending (better = lower loss)
-    combined = combined.sort_values(by=["val_loss", "train_time_ms"]).reset_index(drop=True)
+    combined = combined.sort_values(by=["train_time_ms", "val_loss"]).reset_index(drop=True)
 
     # Add rank
     combined["rank"] = combined.index + 1
 
     # Extract only my runs with their rank
-    my_ranks = combined[combined["source"] == "mine"][["val_loss", "train_time_ms", "rank"]]
+    headers = ["date","run_label", "val_loss", "train_time_ms", "rank"]
+    my_ranks = combined[combined["source"] == "mine"][headers]
 
     print(my_ranks)     
+    
+    top = combined.sort_values(
+        by=["train_time_ms", 'val_loss']
+    ).head(1)
+
+    print(top[headers])
