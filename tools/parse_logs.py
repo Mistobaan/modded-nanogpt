@@ -292,8 +292,8 @@ if __name__ == "__main__":
     # Extract only my runs with their rank
     headers = ["date","run_label", "val_loss", "train_time_ms", "rank"]
     my_ranks = combined[combined["source"] == "mine"][headers]
-
-    print(my_ranks)     
+    
+    print(my_ranks) 
     
     top = combined.sort_values(
         by=["train_time_ms", 'val_loss']
