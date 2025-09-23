@@ -4,21 +4,31 @@ version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
-
-[tool.flake8]
-max-line-length = 88
-extend-ignore = [
-    "E203", # whitespace before ':', conflicts with Black
-    "W503", # line break before binary operator, conflicts with Black
-    "E402",
+dependencies = [
+    "huggingface-hub[hf-transfer]>=0.35.1",
+    "numpy>=2.3.3",
+    "torch~=2.8.0",
 ]
-exclude = [".venv", "build", "dist"]
-max-complexity = 10
-per-file-ignores = ["__init__.py: F401", "./src/*: E402"]
 
 [dependency-groups]
 dev = [
     "flake8>=7.3.0",
     "flake8-pyproject>=1.2.3",
+    "ipykernel>=6.30.1",
+    "pre-commit>=4.3.0",
 ]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.ruff]
+line-length = 88        # match Black
+target-version = "py311"  # or your Python version
+
+[tool.ruff.lint]
+# Enable flake8, pyflakes, pycodestyle, isort, and more
+select = ["E", "F", "I", "W", "B", "C4"]
+# Ignore rules that conflict with Black
+ignore = ["E203"]
