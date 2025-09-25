@@ -90,23 +90,6 @@ def make_writefile_cell(filename: str, content: str) -> dict:
     return make_code_cell(f"%%writefile {filename}\n{content}")
 
 
-def build_library_versions_cell(distributions: Sequence[str]) -> dict:
-    header = "from importlib.metadata import PackageNotFoundError, version\n\n"
-    listing = (
-        "libraries = [\n"
-        + "".join(f'    "{name}",\n' for name in distributions)
-        + "]\n\n"
-    )
-    body = (
-        "for dist in libraries:\n"
-        "    try:\n"
-        '        print(f"{dist}: {version(dist)}")\n'
-        "    except PackageNotFoundError:\n"
-        '        print(f"{dist}: <not installed>")\n'
-    )
-    return make_code_cell(header + listing + body)
-
-
 def create_notebook(
     assets: NotebookAssets,
     train_py: Path,
@@ -117,13 +100,25 @@ def create_notebook(
 ) -> None:
     cells: List[dict] = []
     cells.extend(assets.config_cells)
-    cells.append(build_library_versions_cell(extra_libraries))
+    # cells.append(build_library_versions_cell(extra_libraries))
     cells.append(assets.download_cell)
     cells.append(_build_writefile_cell(train_py, "train_gpt.py"))
+
     # cells.append(_build_bash_cell_inline("nvidia-smi topo -m"))
     # cells.append(_build_writefile_cell(train_sh, "train_gpt.sh"))
     # cells.append(_build_bash_cell(torchrun_sh))
-    cells.append(_build_bash_cell_inline("nvidia-smi topo -m"))
+    # cells.append(_build_bash_cell_inline("nvidia-smi topo -m"))
+    cells.append(
+        make_code_cell("""
+!PYTHONFAULTHANDLER=1 TORCH_SHOW_CPP_STACKTRACES=2 \
+    torchrun \
+        --nproc-per-node 8 \
+    --log-dir logs \
+    --redirects 3 --tee 3 \
+    --max-restarts 0 \
+    --standalone
+    """)
+    )
 
     notebook = {
         "cells": cells,
