@@ -1,0 +1,160 @@
+name: Modal Notebook Runner
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  modal-notebook:
+    name: Run Modal Notebook
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      UV_ENABLE_ANALYTICS: 0
+      MODAL_APP_NAME: modded-nanogpt
+      MODAL_PRESET_CONFIGURATION: 8xH100
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/uv-action@v1
+        with:
+          version: "latest"
+
+      - name: Sync dev dependencies
+        run: uv sync --group dev
+
+      - name: Install Modal CLI
+        run: uv pip install modal
+
+      - name: Run training on Modal
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          uv run modal run train_on_modal.py::main
+
+      - name: Retrieve logs from Modal volume
+        env:
+          MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+          MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+        run: |
+          rm -rf logs
+          mkdir -p logs
+          uv run modal volume get modded-nanogpt-logs / logs
+
+      - name: Build notebook bundle and upload logs
+        if: ${{ secrets.NOTEBOOK_UPLOAD_URL != '' && secrets.NOTEBOOK_UPLOAD_API_KEY != '' }}
+        env:
+          NOTEBOOK_UPLOAD_API_KEY: ${{ secrets.NOTEBOOK_UPLOAD_API_KEY }}
+        run: |
+          uv run python tools/create_training_notebook.py \
+            --upload-url "${{ secrets.NOTEBOOK_UPLOAD_URL }}" \
+            --log-dir logs \
+            --archive-output modal-logs.zip
+
+      - name: Summarize ranking results
+        id: summarize
+        run: |
+          uv run python - <<'PY'
+import json
+import re
+from pathlib import Path
+
+logs_dir = Path("logs")
+logs_dir.mkdir(exist_ok=True)
+
+pattern = re.compile(
+    r"step:(?P<step>\d+)/(\d+)\s+"
+    r"(?:val_loss:(?P<val_loss>[0-9.]+)\s+)?"
+    r"train_time:(?P<train_time>\d+)ms\s+"
+    r"step_avg:(?P<step_avg>[0-9.]+)ms"
+)
+
+runs = []
+for path in sorted(logs_dir.glob("*.txt")):
+    latest = None
+    with path.open() as handle:
+        for line in handle:
+            match = pattern.search(line)
+            if match:
+                groups = match.groupdict()
+                val_loss = groups.get("val_loss")
+                val = float(val_loss) if val_loss is not None else None
+                latest = {
+                    "run_id": path.stem,
+                    "step": int(groups["step"] or 0),
+                    "total_steps": int(match.group(2)),
+                    "train_time_ms": int(groups["train_time"] or 0),
+                    "step_avg_ms": float(groups["step_avg"] or 0.0),
+                    "val_loss": val,
+                    "val_loss_sort": val if val is not None else float("inf"),
+                }
+    if latest:
+        runs.append(latest)
+
+runs.sort(key=lambda item: (item["train_time_ms"], item["val_loss_sort"]))
+
+for idx, run in enumerate(runs, start=1):
+    run["rank"] = idx
+    ms = run["train_time_ms"]
+    seconds = ms / 1000
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        run["train_time_human"] = f"{int(hours)}h {int(minutes)}m {sec:.1f}s"
+    elif minutes:
+        run["train_time_human"] = f"{int(minutes)}m {sec:.1f}s"
+    else:
+        run["train_time_human"] = f"{sec:.1f}s"
+
+ranking_path = Path("ranking.json")
+ranking_path.write_text(json.dumps(runs, indent=2))
+
+summary_lines = ["### Modal Training Ranking", ""]
+
+if runs:
+    summary_lines.append("| Rank | Run | Step | Total | Val Loss | Train Time | Avg Step |")
+    summary_lines.append("| --- | --- | --- | --- | --- | --- | --- |")
+    for run in runs:
+        val_loss = run["val_loss"]
+        val_loss_str = f"{val_loss:.4f}" if val_loss is not None else "n/a"
+        summary_lines.append(
+            f"| {run['rank']} | {run['run_id']} | {run['step']} | {run['total_steps']} | "
+            f"{val_loss_str} | {run['train_time_human']} | {run['step_avg_ms']:.2f} ms |"
+        )
+else:
+    summary_lines.append("> No ranking data was produced during this run.")
+
+summary_path = Path("ranking_summary.md")
+summary_path.write_text("\n".join(summary_lines) + "\n")
+
+print("\n".join(summary_lines))
+PY
+
+      - name: Comment ranking on PR
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const summaryPath = path.join(process.cwd(), 'ranking_summary.md');
+            if (!fs.existsSync(summaryPath)) {
+              core.info('No ranking summary found; skipping comment.');
+              return;
+            }
+            const body = fs.readFileSync(summaryPath, 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });

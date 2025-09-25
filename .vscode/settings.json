@@ -4,4 +4,15 @@
         "editor.defaultFormatter": "charliermarsh.ruff"
     },
     "python-envs.pythonProjects": [],
+    "flake8.args": [
+        "--max-line-length=88",
+        "--ignore=E501,W503,W504,E203",
+        "--max-complexity=10",
+    ],
+    "cSpell.words": [
+        "fineweb",
+        "ipynb",
+        "keepends",
+        "kernelspec"
+    ],
 }
