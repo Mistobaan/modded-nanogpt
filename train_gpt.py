@@ -7,7 +7,6 @@ import time
 import copy
 import glob
 from dataclasses import dataclass
-from functools import lru_cache, partial # Added partial for hook registration
 from pathlib import Path
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -19,15 +18,16 @@ import torch.nn.functional as F
 import torch.distributed as dist
 # use of FlexAttention contributed by @KoszarskyB
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
+from torch.utils.checkpoint import checkpoint as activation_checkpoint
 #torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True    # static shapes
 
-import flash_linear_attention
-
 TRAIN_DATASET = os.path.join(os.path.dirname(__file__), './data/fineweb10B/fineweb_train_000001.bin')
 
 assert os.path.exists(TRAIN_DATASET), TRAIN_DATASET
+# Cached sliding-window blocks per training step (populated lazily post device init)
+_window_schedule_blocks: torch.Tensor | None = None
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
 
@@ -189,23 +189,26 @@ class Muon(torch.optim.Optimizer):
         for group in self.param_groups:
             params: list[Tensor] = group["params"]
             params_pad = params + [torch.empty_like(params[-1])] * world_size
-            momentum = group["momentum"]
+            lr_tensor: Tensor = group["lr_tensor"]
+            momentum_tensor: Tensor = group["momentum_tensor"]
+            weight_decay_tensor: Tensor = group["weight_decay_tensor"]
             for base_i in range(0, len(params), world_size):
                 reduce_scatter_futures[idx].wait()
                 if base_i + rank < len(params):
                     p = params[base_i + rank]
                     grad = p.grad
-                    eff_lr = group["lr"] * max(1, p.size(-2) / p.size(-1)) ** 0.5 * getattr(p, "lr_mul", 1.0)
-                    eff_weight_decay = group["lr"] * group["weight_decay"] * getattr(p, "wd_mul", 1.0)
+                    scale = max(1, p.size(-2) / p.size(-1)) ** 0.5 * getattr(p, "lr_mul", 1.0)
+                    eff_lr = lr_tensor * scale
+                    eff_weight_decay = lr_tensor * weight_decay_tensor * getattr(p, "wd_mul", 1.0)
                     state = self.state[p]
                     if len(state) == 0:
                         state["momentum_buffer"] = torch.zeros_like(grad)
                     momentum_buffer = state["momentum_buffer"]
                     p.mul_(1 - eff_weight_decay)
-                    momentum_buffer.lerp_(grad, 1 - momentum)
-                    grad = grad.lerp_(momentum_buffer, momentum)
+                    momentum_buffer.lerp_(grad, 1 - momentum_tensor)
+                    grad = grad.lerp_(momentum_buffer, momentum_tensor)
                     v = zeropower_via_newtonschulz5(grad.bfloat16(), 5)
-                    p.add_(other=v, alpha=-eff_lr)
+                    p.add_(v * eff_lr, alpha=-1.0)
                 idx += 1
                 all_reduce_futures.append(dist.all_gather(params_pad[base_i:base_i + world_size], params_pad[base_i + rank], async_op=True).get_future())
         torch.futures.collect_all(all_reduce_futures).wait()
@@ -252,7 +255,7 @@ class DistAdam(torch.optim.Optimizer):
                 p = params[base]
                 rank_size = p.shape[0] // world_size
                 p_slice = p[rank * rank_size:(rank + 1) * rank_size]
-                lr = group['lr'] * getattr(p, "lr_mul", 1.0)
+                lr_tensor = group['lr_tensor'] * getattr(p, "lr_mul", 1.0)
                 state = self.state[p]
                 g_slice = grad_slices[idx]
                 # State init
@@ -266,7 +269,8 @@ class DistAdam(torch.optim.Optimizer):
                 t = state['step']
                 # weight decay
                 if wd != 0:
-                    eff_weight_decay = lr * wd * getattr(p, "wd_mul", 1.0)
+                    wd_tensor = group['weight_decay_tensor'] * getattr(p, "wd_mul", 1.0)
+                    eff_weight_decay = lr_tensor * wd_tensor
                     p_slice.mul_(1 - eff_weight_decay)
                 # update running averages
                 exp_avg.mul_(beta1).add_(g_slice, alpha=1 - beta1)
@@ -276,7 +280,7 @@ class DistAdam(torch.optim.Optimizer):
                 bias2 = 1 - beta2 ** t
                 # compute step
                 denom = exp_avg_sq.sqrt().add_(eps)
-                step_size = lr * (torch.sqrt(bias2) / bias1)
+                step_size = lr_tensor * (torch.sqrt(bias2) / bias1)
                 update = exp_avg.div(denom).mul_(step_size)
                 p_slice.add_(other=update, alpha=-1.0)
                 idx += 1
@@ -426,6 +430,7 @@ class GPT(nn.Module):
             param.lr_mul = 75.
         self.lm_head.weight.lr_mul = 27.5
         self.scalars.lr_mul = 5.0
+        self.checkpoint_blocks = tuple(i for i in range(num_layers) if 1 < i < num_layers - 2)
 
     def create_blockmasks(self, input_seq: Tensor, sliding_window_num_blocks: Tensor):
         BLOCK_SIZE = 128
@@ -489,10 +494,14 @@ class GPT(nn.Module):
 
         n = len(self.blocks) // 2
 
-        for i in range(len(self.blocks)):
+        for i, block in enumerate(self.blocks):
             if i >= n:
                 x = x + skip_weights[i - n] * skip_connections.pop()
-            x = self.blocks[i](x, ve[i], x0, lambdas[i], sa_lambdas[i], block_masks[i])
+            block_args = (x, ve[i], x0, lambdas[i], sa_lambdas[i], block_masks[i])
+            if self.training and i in self.checkpoint_blocks:
+                x = activation_checkpoint(block, *block_args, use_reentrant=False)
+            else:
+                x = block(*block_args)
             if i < n:
                 skip_connections.append(x)
 
@@ -635,6 +644,11 @@ optimizers = [optimizer1, optimizer2]
 for opt in optimizers:
     for group in opt.param_groups:
         group["initial_lr"] = group["lr"]
+        param_device = group["params"][0].device
+        group["lr_tensor"] = torch.tensor(group["lr"], dtype=torch.float32, device=param_device)
+        group["weight_decay_tensor"] = torch.tensor(group.get("weight_decay", 0.0), dtype=torch.float32, device=param_device)
+        if "momentum" in group:
+            group["momentum_tensor"] = torch.tensor(group["momentum"], dtype=torch.float32, device=param_device)
 
 # learning rate schedule: stable then decay
 def get_lr(step: int):
@@ -647,16 +661,20 @@ def get_lr(step: int):
         return w * 1.0 + (1 - w) * 0.1
 
 # attention window size schedule: linearly increase
-@lru_cache(1)
-def get_window_size_blocks_helper(window_size: int):
-    return torch.tensor(window_size // 128, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
+def _ensure_window_schedule_blocks() -> torch.Tensor:
+    global _window_schedule_blocks
+    if _window_schedule_blocks is None:
+        values = []
+        for s in range(args.num_iterations + 1):
+            progress = s / args.num_iterations
+            window_size = next_multiple_of_n(1728 * progress, n=128)
+            values.append(window_size // 128)
+        _window_schedule_blocks = torch.tensor(values, dtype=torch.int32, device=device)
+    return _window_schedule_blocks
+
 def get_window_size_blocks(step: int):
-    x = step / args.num_iterations # progress in training
-    assert 0 <= x <= 1
-    # Linearly increase the block-wise sliding window size over training 128 -> 1792
-    # increase by @fernbear.bsky.social; block-wise by @YouJiacheng
-    window_size = next_multiple_of_n(1728 * x, n=128)
-    return get_window_size_blocks_helper(window_size)
+    schedule = _ensure_window_schedule_blocks()
+    return schedule[step]
 
 model: nn.Module = torch.compile(model, dynamic=False)
 
@@ -680,7 +698,41 @@ for _ in range(warmup_steps):
 model.load_state_dict(initial_state["model"])
 for opt, opt_state in zip(optimizers, initial_state["optimizers"]):
     opt.load_state_dict(opt_state)
-del train_loader, initial_state
+# Prepare static buffers for CUDA graph replay
+capture_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, align_to_bos=True)
+capture_inputs, capture_targets = next(capture_loader)
+static_inputs = torch.empty_like(capture_inputs)
+static_targets = torch.empty_like(capture_targets)
+initial_window_blocks = get_window_size_blocks(0)
+static_window = initial_window_blocks.clone()
+
+static_inputs.copy_(capture_inputs)
+static_targets.copy_(capture_targets)
+static_window.copy_(initial_window_blocks)
+
+graph = torch.cuda.CUDAGraph()
+with torch.cuda.graph(graph):
+    loss = model(static_inputs, static_targets, static_window)
+    loss.backward()
+    for opt in optimizers:
+        opt.step()
+    model.zero_grad(set_to_none=True)
+
+# Restore weights and optimizer state in-place without breaking captured tensors
+model.load_state_dict(initial_state["model"])
+for opt in optimizers:
+    for state in opt.state.values():
+        for value in state.values():
+            if torch.is_tensor(value):
+                value.zero_()
+    for group in opt.param_groups:
+        group["lr_tensor"].fill_(group["initial_lr"])
+        group["lr"] = group["initial_lr"]
+        if "momentum_tensor" in group:
+            group["momentum_tensor"].fill_(group["momentum"])
+model.zero_grad(set_to_none=True)
+del capture_loader
+del initial_state
 print0(f"memory summary: {torch.cuda.memory_summary(abbreviated=True)}")
 
 ########################################
@@ -731,19 +783,23 @@ for step in range(train_steps + 1):
 
     # --------------- TRAINING SECTION -----------------
     inputs, targets = next(train_loader)
-    model(inputs, targets, get_window_size_blocks(step)).backward()
-    # set optimization hyperparameters
+    static_inputs.copy_(inputs)
+    static_targets.copy_(targets)
+    static_window.copy_(get_window_size_blocks(step))
+
+    lr_scale = get_lr(step)
     for opt in optimizers:
         for group in opt.param_groups:
-            group["lr"] = group["initial_lr"] * get_lr(step)
+            scaled_lr = group["initial_lr"] * lr_scale
+            group["lr_tensor"].fill_(scaled_lr)
+            group["lr"] = scaled_lr
     for group in optimizer2.param_groups:
-        frac = min(step / 300, 1) # momentum warmup for muon
-        group["momentum"] = (1 - frac) * 0.85 + frac * 0.95
-    # step the optimizers
-    for opt in optimizers:
-        opt.step()
-    # null the gradients
-    model.zero_grad(set_to_none=True)
+        frac = min(step / 300, 1)
+        momentum = (1 - frac) * 0.85 + frac * 0.95
+        group["momentum_tensor"].fill_(momentum)
+        group["momentum"] = momentum
+
+    graph.replay()
     # logging
     approx_training_time_ms = training_time_ms + 1000 * (time.perf_counter() - t0)
     print0(f"step:{step+1}/{train_steps} train_time:{approx_training_time_ms:.0f}ms step_avg:{approx_training_time_ms/(step + 1):.2f}ms", console=True)
