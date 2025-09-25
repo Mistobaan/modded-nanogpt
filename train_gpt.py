@@ -642,6 +642,7 @@ if master_process:
     os.makedirs("logs", exist_ok=True)
     logfile = f"logs/{run_id}.txt"
     print(logfile)
+    print("[RANK0] initializing training run", flush=True)
 def print0(s, console=False):
     if master_process:
         with open(logfile, "a") as f:
@@ -727,6 +728,9 @@ initial_state = dict(model=copy.deepcopy(model.state_dict()),
                      optimizers=[copy.deepcopy(opt.state_dict()) for opt in optimizers]) # save the initial state
 train_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, align_to_bos=True)
 
+if master_process:
+    print("[RANK0] warmup begin", flush=True)
+
 torch.cuda.reset_peak_memory_stats()
 for _ in range(warmup_steps):
     inputs, targets = next(train_loader)
@@ -738,6 +742,8 @@ model.load_state_dict(initial_state["model"])
 for opt, opt_state in zip(optimizers, initial_state["optimizers"]):
     opt.load_state_dict(opt_state)
 _prime_optimizer_states_for_capture(optimizers)
+if master_process:
+    print("[RANK0] warmup completed, capturing CUDA graph", flush=True)
 # Prepare static buffers for CUDA graph replay
 capture_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, align_to_bos=True)
 capture_inputs, capture_targets = next(capture_loader)
@@ -775,6 +781,8 @@ del train_loader
 del capture_loader
 del initial_state
 print0(f"memory summary: {torch.cuda.memory_summary(abbreviated=True)}")
+if master_process:
+    print("[RANK0] CUDA graph captured, entering training loop", flush=True)
 
 ########################################
 #        Training and validation       #
