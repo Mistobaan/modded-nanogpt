@@ -3,8 +3,8 @@
         "ms-python.python",
         "ms-python.vscode-python-envs",
         "ms-python.vscode-pylance",
-        "charliermarsh.ruff",
         "ms-python.debugpy",
-        "ms-python.flake8"
+        "ms-python.flake8",
+        "charliermarsh.ruff"
     ]
 }
