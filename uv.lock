@@ -900,6 +900,7 @@ dependencies = [
     { name = "flash-linear-attention" },
     { name = "huggingface-hub", extra = ["hf-transfer"] },
     { name = "numpy" },
+    { name = "requests" },
     { name = "torch", version = "2.8.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.8.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
@@ -921,6 +922,7 @@ requires-dist = [
     { name = "flash-linear-attention", specifier = ">=0.3.2" },
     { name = "huggingface-hub", extras = ["hf-transfer"], specifier = ">=0.35.1" },
     { name = "numpy", specifier = ">=2.3.3" },
+    { name = "requests", specifier = ">=2.32.3" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32'", specifier = "~=2.8.0" },
     { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = "~=2.8.0", index = "https://download.pytorch.org/whl/cu128" },
 ]
