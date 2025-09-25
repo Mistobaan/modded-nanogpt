@@ -23,6 +23,8 @@ from torch.nn.attention.flex_attention import BlockMask, flex_attention
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.benchmark = True    # static shapes
 
+import flash_linear_attention
+
 TRAIN_DATASET = os.path.join(os.path.dirname(__file__), './data/fineweb10B/fineweb_train_000001.bin')
 
 assert os.path.exists(TRAIN_DATASET), TRAIN_DATASET

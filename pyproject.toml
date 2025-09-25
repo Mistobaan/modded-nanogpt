@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "flash-linear-attention>=0.3.2",
     "huggingface-hub[hf-transfer]>=0.35.1",
     "numpy>=2.3.3",
     "torch~=2.8.0",
