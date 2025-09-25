@@ -290,6 +290,45 @@ class DistAdam(torch.optim.Optimizer):
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for the model
 
+
+def _prime_optimizer_states_for_capture(optimizers):
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    for opt in optimizers:
+        if isinstance(opt, Muon):
+            for group in opt.param_groups:
+                for p in group["params"]:
+                    state = opt.state[p]
+                    if "momentum_buffer" not in state:
+                        state["momentum_buffer"] = torch.zeros_like(p)
+        elif isinstance(opt, DistAdam):
+            for group in opt.param_groups:
+                params = group["params"]
+                for p in params:
+                    state = opt.state[p]
+                    if "step" not in state:
+                        state["step"] = torch.zeros((), dtype=torch.int64, device=p.device)
+                    if p.ndim == 0:
+                        if "exp_avg" not in state:
+                            state["exp_avg"] = torch.zeros_like(p)
+                        if "exp_avg_sq" not in state:
+                            state["exp_avg_sq"] = torch.zeros_like(p)
+                        continue
+                    rank_size = p.shape[0] // world_size
+                    shard = p[rank * rank_size:(rank + 1) * rank_size]
+                    if shard.numel() == 0:
+                        shard_shape = (0,) + p.shape[1:]
+                        if "exp_avg" not in state:
+                            state["exp_avg"] = torch.zeros(shard_shape, dtype=p.dtype, device=p.device)
+                        if "exp_avg_sq" not in state:
+                            state["exp_avg_sq"] = torch.zeros(shard_shape, dtype=p.dtype, device=p.device)
+                        continue
+                    if "exp_avg" not in state:
+                        state["exp_avg"] = torch.zeros_like(shard)
+                    if "exp_avg_sq" not in state:
+                        state["exp_avg_sq"] = torch.zeros_like(shard)
+
+
 def norm(x: Tensor):
     return F.rms_norm(x, (x.size(-1),))
 
@@ -698,6 +737,7 @@ for _ in range(warmup_steps):
 model.load_state_dict(initial_state["model"])
 for opt, opt_state in zip(optimizers, initial_state["optimizers"]):
     opt.load_state_dict(opt_state)
+_prime_optimizer_states_for_capture(optimizers)
 # Prepare static buffers for CUDA graph replay
 capture_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, align_to_bos=True)
 capture_inputs, capture_targets = next(capture_loader)
@@ -731,6 +771,7 @@ for opt in optimizers:
         if "momentum_tensor" in group:
             group["momentum_tensor"].fill_(group["momentum"])
 model.zero_grad(set_to_none=True)
+del train_loader
 del capture_loader
 del initial_state
 print0(f"memory summary: {torch.cuda.memory_summary(abbreviated=True)}")
