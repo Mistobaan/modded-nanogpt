@@ -119,10 +119,11 @@ def create_notebook(
     cells.extend(assets.config_cells)
     cells.append(build_library_versions_cell(extra_libraries))
     cells.append(assets.download_cell)
-    cells.append(_build_writefile_cell(train_py, "train_gpy.py"))
+    cells.append(_build_writefile_cell(train_py, "train_gpt.py"))
+    # cells.append(_build_bash_cell_inline("nvidia-smi topo -m"))
+    # cells.append(_build_writefile_cell(train_sh, "train_gpt.sh"))
+    # cells.append(_build_bash_cell(torchrun_sh))
     cells.append(_build_bash_cell_inline("nvidia-smi topo -m"))
-    cells.append(_build_writefile_cell(train_sh, "train_gpt.sh"))
-    cells.append(_build_bash_cell(torchrun_sh))
 
     notebook = {
         "cells": cells,
